@@ -92,6 +92,7 @@
       const walk = rows[0];
       if (!walk) {
         clearInterval(timer);
+        lastSeen = null;
         return say('This walk has finished, or the link has expired.');
       }
       titleEl.textContent = `🐕 ${walk.title || 'Live walk'}`;
@@ -99,6 +100,8 @@
       drawRoute(walk.route);
       if (walk.ended) {
         clearInterval(timer);
+        // Stops the once-a-second clock from writing "Live" over this.
+        lastSeen = null;
         walker.remove();
         return say('The walk has ended. 🏁');
       }
