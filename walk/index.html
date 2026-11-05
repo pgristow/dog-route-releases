@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Private links: keep them out of search engines. -->
+  <meta name="robots" content="noindex" />
+  <title>Dog Route · Live walk</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.0/dist/maplibre-gl.css" />
+  <style>
+    :root { --brand: #e8590c; --ink: #1f2328; --muted: #57606a; --surface: #fff; --user: #1c7ed6; }
+    html, body { margin: 0; height: 100%; font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--ink); background: #f6f4ef; }
+    #map { position: fixed; inset: 0; }
+    .card {
+      position: fixed; left: 16px; right: 16px; top: 16px; max-width: 480px; margin: 0 auto;
+      padding: 12px 16px; border-radius: 14px; background: var(--surface); box-shadow: 0 4px 16px rgba(0, 0, 0, .25);
+    }
+    .card h1 { margin: 0; font-size: 18px; }
+    .card p { margin: 4px 0 0; color: var(--muted); font-size: 14px; }
+    .live { color: #2b8a3e; font-weight: 600; }
+    .stale { color: #b35c00; font-weight: 600; }
+    .walker { width: 18px; height: 18px; border-radius: 50%; background: var(--user); border: 3px solid #fff; box-shadow: 0 0 0 0 rgba(28, 126, 214, .5); animation: pulse 2s infinite; }
+    @keyframes pulse { 70% { box-shadow: 0 0 0 14px rgba(28, 126, 214, 0); } 100% { box-shadow: 0 0 0 0 rgba(28, 126, 214, 0); } }
+    @media (prefers-reduced-motion: reduce) { .walker { animation: none; } }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div class="card" role="status" aria-live="polite">
+    <h1 id="title">🐕 Live walk</h1>
+    <p id="status">Loading…</p>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+  <script>
+    // Filled in when the page is published (scripts/build-viewer.mjs). The key is the
+    // public one the app ships with; it can only look up a walk by its code.
+    const SUPABASE_URL = 'https://efnsuqbejasmbbifwmur.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVmbnN1cWJlamFzbWJiaWZ3bXVyIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM3OTM1OTUsImV4cCI6MjEwOTM2OTU5NX0.40cKmykpASShOhGT_HOcLaxa94TT3sCKobEHVST0flI';
+    const POLL_MS = 10000;
+    /** No news for this long and the walker has probably lost signal. */
+    const STALE_MS = 90000;
+
+    // The code is after the #, so it never reaches any server's logs.
+    const code = location.hash.slice(1);
+    const titleEl = document.getElementById('title');
+    const statusEl = document.getElementById('status');
+    const say = (text, cls) => { statusEl.textContent = text; statusEl.className = cls || ''; };
+
+    const map = new maplibregl.Map({ container: 'map', style: 'https://tiles.openfreemap.org/styles/liberty', center: [22.13, -34.18], zoom: 13, attributionControl: { compact: true } });
+    const dot = document.createElement('div');
+    dot.className = 'walker';
+    const walker = new maplibregl.Marker({ element: dot });
+    let drawnRoute = false;
+    let placed = false;
+    let lastSeen = null;
+    let timer = null;
+
+    const ago = (ms) => {
+      const s = Math.max(0, Math.round(ms / 1000));
+      return s < 60 ? `${s} s ago` : `${Math.round(s / 60)} min ago`;
+    };
+
+    function drawRoute(route) {
+      if (drawnRoute || !route || route.length < 2) return;
+      drawnRoute = true;
+      const coords = route.map((p) => [p.lng, p.lat]);
+      const add = () => {
+        map.addSource('route', { type: 'geojson', data: { type: 'Feature', geometry: { type: 'LineString', coordinates: coords }, properties: {} } });
+        map.addLayer({ id: 'route-casing', type: 'line', source: 'route', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#fff', 'line-width': 9 } });
+        map.addLayer({ id: 'route', type: 'line', source: 'route', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': '#e8590c', 'line-width': 5 } });
+        const bounds = coords.reduce((b, c) => b.extend(c), new maplibregl.LngLatBounds(coords[0], coords[0]));
+        if (!placed) map.fitBounds(bounds, { padding: { top: 120, bottom: 40, left: 40, right: 40 }, duration: 0 });
+      };
+      if (map.isStyleLoaded()) add(); else map.once('load', add);
+    }
+
+    async function poll() {
+      if (!/^[A-Za-z0-9_-]{22}$/.test(code)) return say("This link isn't complete. Ask for it to be sent again.");
+      let rows;
+      try {
+        const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/watch_walk`, {
+          method: 'POST',
+          headers: { apikey: SUPABASE_ANON_KEY, authorization: `Bearer ${SUPABASE_ANON_KEY}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ p_code: code }),
+        });
+        if (!res.ok) throw new Error(String(res.status));
+        rows = await res.json();
+      } catch {
+        say('No connection. Trying again…', 'stale');
+        return;
+      }
+      const walk = rows[0];
+      if (!walk) {
+        clearInterval(timer);
+        return say('This walk has finished, or the link has expired.');
+      }
+      titleEl.textContent = `🐕 ${walk.title || 'Live walk'}`;
+      document.title = `${walk.title || 'Live walk'} · Dog Route`;
+      drawRoute(walk.route);
+      if (walk.ended) {
+        clearInterval(timer);
+        walker.remove();
+        return say('The walk has ended. 🏁');
+      }
+      if (walk.lat == null) return say('Walk started. The dot appears once they are a little way from home.');
+      const at = [walk.lng, walk.lat];
+      walker.setLngLat(at).addTo(map);
+      if (!placed) {
+        placed = true;
+        map.easeTo({ center: at, zoom: Math.max(map.getZoom(), 15) });
+      }
+      lastSeen = new Date(walk.position_at).getTime();
+      tick();
+    }
+
+    function tick() {
+      if (lastSeen === null) return;
+      const age = Date.now() - lastSeen;
+      say(age > STALE_MS ? `Last seen ${ago(age)}: they may have lost signal` : `● Live · updated ${ago(age)}`, age > STALE_MS ? 'stale' : 'live');
+    }
+
+    poll();
+    timer = setInterval(poll, POLL_MS);
+    setInterval(tick, 1000);
+  </script>
+</body>
+</html>
